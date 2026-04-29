@@ -44,10 +44,17 @@ async def metadata():
         "team_members": ["Safal Singh"],
         "model": "llama-3.1-8b-instant via Groq",
         "approach": (
-            "4-context LLM composer with trigger-kind dispatch, "
-            "case-study-anchored prompt guidance, "
-            "auto-reply detection, intent-transition routing, "
-            "and suppression-key dedup"
+            "Stateful 4-context composer (category + merchant + trigger + customer) "
+            "with per-trigger-kind prompt dispatch. "
+            "Category-specific voice profiles: dental (clinical citation), "
+            "pharmacy (regulatory precision), restaurant (operator jargon), "
+            "salon (seasonal/event framing), gym (loss-aversion retention). "
+            "Auto-reply detection via 12-pattern regex with graduated response (wait → end). "
+            "Commit-intent detection for instant action-mode switch. "
+            "Hindi-English code-mix for regional merchants. "
+            "Temperature=0 for full determinism. "
+            "320-char body enforcement. "
+            "Suppression-key dedup across ticks."
         ),
         "contact_email": "safalsingh76@gmail.com",
         "version": "2.0.0",
