@@ -78,12 +78,12 @@ async def push_context(body: CtxBody):
     cur = contexts.get(key)
 
     if cur and cur["version"] > body.version:
-        # Stale version — reject
-        return JSONResponse(status_code=409, content={
-            "accepted": False,
-            "reason": "stale_version",
-            "current_version": cur["version"]
-        })
+        # Stale push — still accept it; just keep the newer version
+        return {
+            "accepted": True,
+            "ack_id": f"ack_{body.context_id}_v{body.version}_stale_noop",
+            "stored_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        }
     if cur and cur["version"] == body.version:
         # Same version — idempotent no-op, return 200 accepted
         return {
@@ -290,6 +290,8 @@ async def reply(body: ReplyBody):
         return {"action": "end", "rationale": result.get("rationale", "Conversation closed.")}
 
     if action == "wait":
+        # Save updated state (auto_reply_count must persist)
+        conversations[conv_id] = conv
         return {
             "action": "wait",
             "wait_seconds": result.get("wait_seconds", 3600),
