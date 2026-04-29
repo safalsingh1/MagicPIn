@@ -40,8 +40,8 @@ async def healthz():
 @app.get("/v1/metadata")
 async def metadata():
     return {
-        "team_name": "Vera Composer",
-        "team_members": ["Participant"],
+        "team_name": "ContextCraft AI",
+        "team_members": ["Safal Singh"],
         "model": "llama-3.1-8b-instant via Groq",
         "approach": (
             "4-context LLM composer with trigger-kind dispatch, "
@@ -49,9 +49,9 @@ async def metadata():
             "auto-reply detection, intent-transition routing, "
             "and suppression-key dedup"
         ),
-        "contact_email": "participant@example.com",
+        "contact_email": "safalsingh76@gmail.com",
         "version": "2.0.0",
-        "submitted_at": "2026-04-29T14:00:00Z"
+        "submitted_at": "2026-04-30T02:45:00Z"
     }
 
 
