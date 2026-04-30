@@ -1,8 +1,13 @@
 """
-composer.py — Vera 4-context message composer (competition-grade)
-=================================================================
+composer.py — Vera 4-context message composer (competition-grade v2)
+====================================================================
 Uses Groq llama-3.1-8b-instant (500K TPD free tier).
 Dispatches on trigger.kind with case-study-anchored prompt guidance.
+
+CRITICAL FIXES from judge feedback:
+- Numbers MUST be copied verbatim from context (was hallucinating 10 mSv instead of 1.0 mSv)
+- Vera's capabilities explicitly bounded (was over-promising "I'll bring a radiation safety expert")
+- Stronger grounding: use ONLY data present in context
 """
 
 import os, json, re
@@ -31,7 +36,7 @@ VOICE_PROFILES = {
     "salons": (
         "Warm, practical, fellow-operator register. Use owner first name directly. "
         "Highlight services-at-price (not % discounts). "
-        "Emojis sparingly (💍 🌸 ✨ max 1). Reference specific stylists, services, or past treatments when known. "
+        "Emojis sparingly (max 1). Reference specific stylists, services, or past treatments when known. "
         "Honor Hindi-English code-mix when appropriate."
     ),
     "restaurants": (
@@ -57,12 +62,15 @@ TRIGGER_GUIDANCE = {
     "research_digest": (
         "Frame: 'new research just landed relevant to your [patients/customers]'. "
         "MUST include: paper/journal name, trial size (N=X), key finding (X%), source citation (Journal Year p.XX). "
+        "ALL of these MUST come from the category digest items — look in digest[]. "
         "Anchor to merchant's own patient cohort from customer_aggregate. "
         "CTA: offer to pull abstract + draft patient-ed content."
     ),
     "regulation_change": (
         "Frame as urgent compliance notice. MUST include: regulator name, circular/doc ref, deadline date, "
-        "specific change (e.g. dose limit drop from X to Y mSv). Offer to help prepare checklist/SOP."
+        "specific change (copy the EXACT numbers from trigger payload — if it says 1.0, write 1.0, NOT 10). "
+        "Offer to help prepare checklist/SOP. "
+        "Vera CAN draft the checklist. Vera CANNOT visit premises or bring inspectors."
     ),
     "recall_due": (
         "Customer-facing recall. Address customer by first name. State exact months since last visit. "
@@ -70,9 +78,9 @@ TRIGGER_GUIDANCE = {
         "Language: match customer language_pref (hi-en mix if hi). CTA: multi-choice slot (Reply 1 for X, 2 for Y)."
     ),
     "perf_dip": (
-        "Flag exact dip percentage and metric. Diagnose probable cause from signals. "
+        "Flag exact dip percentage and metric FROM THE CONTEXT. Diagnose probable cause from signals. "
         "Propose ONE concrete fix (create offer, reply to reviews, update GBP). Loss aversion framing. "
-        "NEVER generic 'your performance dropped' — specific numbers only."
+        "NEVER generic 'your performance dropped' — use the exact numbers from delta_7d."
     ),
     "perf_spike": (
         "Celebrate briefly, then immediately: 'here's how to lock in this momentum'. "
@@ -115,13 +123,16 @@ TRIGGER_GUIDANCE = {
         "Effort externalization: 'Takes 5 min, I'll do the rest'."
     ),
     "supply_alert": (
-        "Urgent compliance. MUST include: batch numbers, molecule name, manufacturer code. "
+        "Urgent compliance. MUST include: batch numbers, molecule name, manufacturer code — "
+        "ALL copied EXACTLY from the trigger payload. "
         "Compute and state affected customer count from merchant's customer_aggregate. "
+        "Use bounded risk framing ('sub-potency, no safety risk' if applicable). "
         "Offer: draft WhatsApp note + replacement pickup workflow."
     ),
     "chronic_refill_due": (
-        "Customer-facing refill reminder. MUST include: full molecule names, run-out date. "
-        "Compute: total ₹ + savings from active senior/loyalty offer. "
+        "Customer-facing refill reminder. MUST include: full molecule names, run-out date — "
+        "ALL from the trigger payload, copied EXACTLY. "
+        "Compute: total cost + savings from active senior/loyalty offer. "
         "Confirm delivery. Two-channel CTA (Reply CONFIRM + phone number)."
     ),
     "customer_lapsed_hard": (
@@ -187,8 +198,24 @@ HARD CONSTRAINTS (violations = score 0):
 1. Body MUST be ≤ 320 characters. Count carefully before responding.
 2. NO URLs — ever. Not even shortened ones.
 3. EXACTLY ONE CTA. Place it as the final sentence only.
-4. NEVER fabricate data not present in the context. Use only what is given.
+4. NEVER fabricate data not present in the context. Use ONLY what is given.
 5. No long preambles. Start with the hook or the data point.
+6. Copy ALL numbers EXACTLY from the context. If context says 1.0, write 1.0 — NOT 10. If context says 38%, write 38%. Do NOT round, approximate, or change any numerical values.
+
+VERA's CAPABILITIES (ONLY these — NEVER promise anything else):
+- Draft WhatsApp messages, GBP posts, Instagram stories, campaign copy
+- Analyze merchant data (reviews, performance, customer lists)
+- Create/suggest offers and campaigns
+- Draft compliance checklists and SOPs
+- Pull research abstracts and summaries
+
+VERA CANNOT (NEVER promise these — instant score penalty):
+- Schedule or conduct physical visits or inspections
+- Bring experts, auditors, consultants, or any person
+- Make phone calls or send emails directly
+- Provide medical, legal, or tax advice
+- Access external systems not in the context
+- Perform any physical real-world action
 
 QUALITY SIGNALS (use 1-3 per message):
 - Specificity: real numbers, dates, source citations, batch numbers, molecule names
@@ -221,7 +248,7 @@ def _build_user_prompt(category: dict, merchant: dict, trigger: dict, customer) 
     perf = merchant.get("performance", {})
     delta = perf.get("delta_7d", {})
     offers = merchant.get("offers", [])
-    active_offers = [f"{o['title']} (₹{o.get('price','?')})" if o.get('price') else o['title']
+    active_offers = [f"{o['title']} (price={o.get('price','?')})" if o.get('price') else o['title']
                      for o in offers if o.get("status") == "active"]
     sigs = merchant.get("signals", [])
     conv_hist = merchant.get("conversation_history", [])
@@ -234,6 +261,7 @@ def _build_user_prompt(category: dict, merchant: dict, trigger: dict, customer) 
     seasonal = category.get("seasonal_beats", [])
     trends = category.get("trend_signals", [])
     offer_catalog = category.get("offer_catalog", [])
+    voice = category.get("voice", {})
 
     trg_payload = trigger.get("payload", {})
 
@@ -242,8 +270,8 @@ def _build_user_prompt(category: dict, merchant: dict, trigger: dict, customer) 
     calls_delta = delta.get("calls_pct", 0) or 0
     days_remaining = sub.get("days_remaining", "?")
     sub_status = sub.get("status", "unknown")
-    lapsed_count = cust_agg.get("lapsed_count", 0)
-    active_count = cust_agg.get("active_count", 0)
+    lapsed_count = cust_agg.get("lapsed_count", 0) or cust_agg.get("lapsed_180d_plus", 0)
+    active_count = cust_agg.get("active_count", 0) or cust_agg.get("total_unique_ytd", 0)
 
     trend_parts = []
     for t in trends[:3]:
@@ -254,13 +282,15 @@ def _build_user_prompt(category: dict, merchant: dict, trigger: dict, customer) 
     lines = [
         "=== CATEGORY CONTEXT ===",
         f"Slug: {category.get('slug')}",
-        f"Peer stats: avg_rating={peer_stats.get('avg_rating')}, avg_ctr={peer_stats.get('avg_ctr')}, scope={peer_stats.get('scope', '')}",
-        f"Offer catalog examples: {[o.get('title') for o in offer_catalog[:4]]}",
-        f"Seasonal beats: {[s.get('note') for s in seasonal[:3]]}",
+        f"Voice rules: {json.dumps(voice, ensure_ascii=False)}" if voice else "",
+        f"Peer stats: avg_rating={peer_stats.get('avg_rating')}, avg_ctr={peer_stats.get('avg_ctr')}, avg_reviews={peer_stats.get('avg_reviews')}, scope={peer_stats.get('scope', '')}",
+        f"Offer catalog examples: {json.dumps([o.get('title') for o in offer_catalog[:4]], ensure_ascii=False)}",
+        f"Seasonal beats: {json.dumps([s.get('note') for s in seasonal[:3]], ensure_ascii=False)}",
         f"Trend signals: {trend_parts}",
-        f"Digest items: {json.dumps(digest[:3], ensure_ascii=False)}",
+        f"Digest items (USE THESE for research/compliance references): {json.dumps(digest[:5], ensure_ascii=False)}",
         "",
         "=== MERCHANT CONTEXT ===",
+        f"Merchant ID: {merchant.get('merchant_id', trigger.get('merchant_id', ''))}",
         f"Name: {identity.get('name')}",
         f"Owner first name: {identity.get('owner_first_name')} (USE THIS when addressing the merchant)",
         f"City / Locality: {identity.get('city')}, {identity.get('locality')}",
@@ -269,7 +299,7 @@ def _build_user_prompt(category: dict, merchant: dict, trigger: dict, customer) 
         f"Subscription: status={sub_status}, plan={sub.get('plan')}, days_remaining={days_remaining}",
         f"Performance (30d): views={perf.get('views')}, calls={perf.get('calls')}, ctr={perf.get('ctr')}, leads={perf.get('leads')}",
         f"7-day delta: views={views_delta:+.1f}%, calls={calls_delta:+.1f}%",
-        f"Active offers (use these, do not invent offers): {active_offers}",
+        f"Active offers (use these, do NOT invent offers): {active_offers}",
         f"Customer aggregate: active={active_count}, lapsed={lapsed_count}, full={json.dumps(cust_agg, ensure_ascii=False)}",
         f"Signals: {sigs}",
         f"Review themes (use verbatim if referencing): {json.dumps(rev_themes[:3], ensure_ascii=False)}",
@@ -279,9 +309,9 @@ def _build_user_prompt(category: dict, merchant: dict, trigger: dict, customer) 
         f"ID: {trigger.get('id')}",
         f"Kind: {trigger.get('kind')}",
         f"Urgency: {trigger.get('urgency')} / 5",
-        f"Suppression key (copy this into your response): {trigger.get('suppression_key')}",
+        f"Suppression key (COPY this into your response): {trigger.get('suppression_key')}",
         f"Expires: {trigger.get('expires_at')}",
-        f"Payload (all data from trigger — USE these numbers): {json.dumps(trg_payload, ensure_ascii=False)}",
+        f"Payload (ALL data from trigger — use these numbers EXACTLY as written): {json.dumps(trg_payload, ensure_ascii=False)}",
     ]
 
     if customer:
@@ -299,7 +329,8 @@ def _build_user_prompt(category: dict, merchant: dict, trigger: dict, customer) 
                 lv = datetime.fromisoformat(last_visit.replace("Z", "+00:00"))
                 now = datetime.now(lv.tzinfo)
                 months_ago = round((now - lv).days / 30)
-                months_hint = f" (~{months_ago} months ago)"
+                days_ago = (now - lv).days
+                months_hint = f" (~{months_ago} months / {days_ago} days ago)"
             except Exception:
                 pass
 
@@ -313,16 +344,18 @@ def _build_user_prompt(category: dict, merchant: dict, trigger: dict, customer) 
             f"Last visit: {last_visit}{months_hint}",
             f"Total visits: {rel.get('visits_total')}",
             f"Services received: {rel.get('services_received', [])}",
-            f"Lifetime value: ₹{rel.get('lifetime_value', 0)}",
-            f"Slot preferences: {prefs.get('slot_preferences', [])}",
+            f"Lifetime value: Rs.{rel.get('lifetime_value', 0)}",
+            f"Slot preferences: {prefs.get('slot_preferences', prefs.get('preferred_slots', []))}",
             f"Consent scope: {consent}",
         ]
 
     lines.append("")
     lines.append(
-        "NOW COMPOSE. Use the trigger payload numbers directly. "
+        "NOW COMPOSE. Use the trigger payload numbers EXACTLY as written (do NOT change any numbers). "
         "Reference the merchant by owner_first_name. "
-        "Stay strictly ≤320 chars. Return JSON only."
+        "Stay strictly ≤320 chars. "
+        "NEVER promise to visit, bring experts, or do anything physical. "
+        "Return JSON only."
     )
 
     return "\n".join(lines)
@@ -355,6 +388,7 @@ def compose_message(category: dict, merchant: dict, trigger: dict, customer=None
 
     result = _parse_json_response(raw)
     if not result:
+        print(f"[PARSE ERROR] Could not parse LLM response: {raw[:200]}")
         return _fallback_compose(merchant, trigger)
 
     # Enforce constraints
@@ -417,6 +451,8 @@ def _fallback_compose(merchant: dict, trigger: dict) -> dict:
         body = f"Your patient's recall window is open. Want me to draft a WhatsApp reminder with available slots? Reply YES."
     elif kind == "supply_alert":
         body = f"{name}, there's an urgent supply alert affecting some of your customers. Want me to draft their notification? Reply YES."
+    elif kind == "regulation_change":
+        body = f"{name}, new regulation change affecting your practice. Want me to draft a compliance checklist? Reply YES."
     else:
         body = f"{name}, I have an update relevant to your business. Want me to share the details? Reply YES."
 

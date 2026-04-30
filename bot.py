@@ -1,11 +1,11 @@
 """
-Vera Bot â€” magicpin AI Challenge
+Vera Bot — magicpin AI Challenge
 =================================
 FastAPI bot implementing the 4-context composition framework.
 Endpoint: POST /v1/context | POST /v1/tick | POST /v1/reply | GET /v1/healthz | GET /v1/metadata
 """
 
-import os, time, re, json, uuid
+import os, time, re, json, uuid, traceback
 from datetime import datetime, timezone
 from typing import Any, Optional
 from fastapi import FastAPI, Request
@@ -14,16 +14,16 @@ from pydantic import BaseModel
 from composer import compose_message
 from reply_handler import handle_reply
 
-app = FastAPI(title="Vera Bot", version="1.0.0")
+app = FastAPI(title="Vera Bot", version="2.1.0")
 START_TIME = time.time()
 
-# â”€â”€ In-memory state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── In-memory state ─────────────────────────────────────────────────────────
 contexts: dict[tuple[str, str], dict] = {}          # (scope, context_id) -> {version, payload}
 conversations: dict[str, dict] = {}                  # conv_id -> {merchant_id, customer_id, turns[], ended, suppressed}
 suppressed_keys: set[str] = set()                    # suppression_key -> skip send
 ended_conversations: set[str] = set()
 
-# â”€â”€ Health & Metadata â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── Health & Metadata ────────────────────────────────────────────────────────
 @app.get("/v1/healthz")
 async def healthz():
     counts = {"category": 0, "merchant": 0, "customer": 0, "trigger": 0}
@@ -57,12 +57,12 @@ async def metadata():
             "Suppression-key dedup across ticks."
         ),
         "contact_email": "safalsingh76@gmail.com",
-        "version": "2.0.0",
-        "submitted_at": "2026-04-30T02:45:00Z"
+        "version": "2.1.0",
+        "submitted_at": "2026-04-30T14:30:00Z"
     }
 
 
-# â”€â”€ Context Push â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── Context Push ────────────────────────────────────────────────────────────
 class CtxBody(BaseModel):
     scope: str
     context_id: str
@@ -85,20 +85,14 @@ async def push_context(body: CtxBody):
     cur = contexts.get(key)
 
     if cur and cur["version"] > body.version:
-        # Stale push — still accept it; just keep the newer version
+        # Stale version — accept gracefully but don't overwrite
         return {
             "accepted": True,
             "ack_id": f"ack_{body.context_id}_v{body.version}_stale_noop",
             "stored_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         }
-    if cur and cur["version"] == body.version:
-        # Same version — idempotent no-op, return 200 accepted
-        return {
-            "accepted": True,
-            "ack_id": f"ack_{body.context_id}_v{body.version}_noop",
-            "stored_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        }
 
+    # Store (or update) the context
     contexts[key] = {"version": body.version, "payload": body.payload}
     return {
         "accepted": True,
@@ -107,7 +101,7 @@ async def push_context(body: CtxBody):
     }
 
 
-# â”€â”€ Tick â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── Tick ─────────────────────────────────────────────────────────────────────
 class TickBody(BaseModel):
     now: str
     available_triggers: list[str] = []
@@ -116,12 +110,14 @@ class TickBody(BaseModel):
 @app.post("/v1/tick")
 async def tick(body: TickBody):
     actions = []
+    print(f"[TICK] now={body.now}, triggers={body.available_triggers}, contexts_count={len(contexts)}")
 
     # Sort triggers by urgency descending
     trigger_items = []
     for trg_id in body.available_triggers:
         trg_data = contexts.get(("trigger", trg_id))
         if not trg_data:
+            print(f"[TICK] Trigger {trg_id} not found in contexts")
             continue
         trg = trg_data["payload"]
         trigger_items.append((trg_id, trg, trg.get("urgency", 1)))
@@ -135,6 +131,7 @@ async def tick(body: TickBody):
         # Suppression check
         sup_key = trg.get("suppression_key", "")
         if sup_key and sup_key in suppressed_keys:
+            print(f"[TICK] Trigger {trg_id} suppressed (key={sup_key})")
             continue
 
         # Expiry check
@@ -142,7 +139,9 @@ async def tick(body: TickBody):
         if exp:
             try:
                 exp_dt = datetime.fromisoformat(exp.replace("Z", "+00:00"))
-                if datetime.now(timezone.utc) > exp_dt:
+                now_dt = datetime.fromisoformat(body.now.replace("Z", "+00:00"))
+                if now_dt > exp_dt:
+                    print(f"[TICK] Trigger {trg_id} expired")
                     continue
             except Exception:
                 pass
@@ -150,17 +149,23 @@ async def tick(body: TickBody):
         merchant_id = trg.get("merchant_id")
         customer_id = trg.get("customer_id")
 
+        # Merchant lookup — required
         merchant_data = contexts.get(("merchant", merchant_id))
         if not merchant_data:
+            print(f"[TICK] Merchant {merchant_id} not found for trigger {trg_id}")
             continue
         merchant = merchant_data["payload"]
 
+        # Category lookup — graceful fallback if missing
         category_slug = merchant.get("category_slug", "")
         category_data = contexts.get(("category", category_slug))
-        if not category_data:
-            continue
-        category = category_data["payload"]
+        if category_data:
+            category = category_data["payload"]
+        else:
+            print(f"[TICK] Category '{category_slug}' not found, using minimal fallback")
+            category = {"slug": category_slug}
 
+        # Customer lookup — optional
         customer = None
         if customer_id:
             cust_data = contexts.get(("customer", customer_id))
@@ -175,11 +180,14 @@ async def tick(body: TickBody):
         # Compose the message
         try:
             result = compose_message(category, merchant, trg, customer)
+            print(f"[TICK] Composed for {trg_id}: {result.get('body', '')[:80]}...")
         except Exception as e:
-            print(f"[COMPOSER ERROR] {e}")
+            print(f"[COMPOSER ERROR] {trg_id}: {e}")
+            traceback.print_exc()
             continue
 
         if not result or not result.get("body"):
+            print(f"[TICK] Empty result for {trg_id}")
             continue
 
         body_text = result["body"]
@@ -220,10 +228,11 @@ async def tick(body: TickBody):
 
         actions.append(action)
 
+    print(f"[TICK] Returning {len(actions)} actions")
     return {"actions": actions}
 
 
-# â”€â”€ Reply â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── Reply ─────────────────────────────────────────────────────────────────────
 class ReplyBody(BaseModel):
     conversation_id: str
     merchant_id: Optional[str] = None
@@ -238,6 +247,7 @@ class ReplyBody(BaseModel):
 async def reply(body: ReplyBody):
     conv_id = body.conversation_id
     message = body.message
+    print(f"[REPLY] conv={conv_id}, from={body.from_role}, msg={message[:80]}")
 
     # Get or create conversation state
     conv = conversations.get(conv_id, {
@@ -264,7 +274,7 @@ async def reply(body: ReplyBody):
     # Load contexts
     merchant = contexts.get(("merchant", merchant_id), {}).get("payload", {})
     category_slug = conv.get("category_slug") or merchant.get("category_slug", "")
-    category = contexts.get(("category", category_slug), {}).get("payload", {})
+    category = contexts.get(("category", category_slug), {}).get("payload", {"slug": category_slug})
     customer = None
     if customer_id:
         cust_data = contexts.get(("customer", customer_id))
@@ -285,10 +295,12 @@ async def reply(body: ReplyBody):
         )
     except Exception as e:
         print(f"[REPLY ERROR] {e}")
-        result = {"action": "send", "body": "Got it â€” let me check and get back to you.", "cta": "open_ended", "rationale": "Fallback reply"}
+        traceback.print_exc()
+        result = {"action": "send", "body": "Got it — let me check and get back to you.", "cta": "open_ended", "rationale": "Fallback reply"}
 
     # Post-process
     action = result.get("action", "send")
+    print(f"[REPLY] action={action}")
 
     if action == "end":
         conv["ended"] = True
@@ -321,7 +333,7 @@ async def reply(body: ReplyBody):
     }
 
 
-# â”€â”€ Optional teardown â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── Optional teardown ──────────────────────────────────────────────────────
 @app.post("/v1/teardown")
 async def teardown():
     contexts.clear()
