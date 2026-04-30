@@ -46,9 +46,9 @@ async def metadata():
         "approach": (
             "Stateful 4-context composer (category + merchant + trigger + customer) "
             "with per-trigger-kind prompt dispatch. "
-            "Category-specific voice profiles: dental (clinical citation), "
-            "pharmacy (regulatory precision), restaurant (operator jargon), "
-            "salon (seasonal/event framing), gym (loss-aversion retention). "
+            "Category-specific voice profiles (dental: clinical citation, "
+            "pharmacy: regulatory precision, restaurant: operator jargon, "
+            "salon: lifestyle warmth, gym: motivational urgency). "
             "Auto-reply detection via 12-pattern regex with graduated response (wait → end). "
             "Commit-intent detection for instant action-mode switch. "
             "Hindi-English code-mix for regional merchants. "
