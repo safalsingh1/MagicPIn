@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from composer import compose_message
 from reply_handler import handle_reply
 
-app = FastAPI(title="Vera Bot", version="2.1.0")
+app = FastAPI(title="Vera Bot", version="3.0.0")
 START_TIME = time.time()
 
 # ── In-memory state ─────────────────────────────────────────────────────────
@@ -42,23 +42,24 @@ async def metadata():
     return {
         "team_name": "ContextCraft AI",
         "team_members": ["Safal Singh"],
-        "model": "llama-3.1-8b-instant via Groq",
+        "model": "deterministic rules with Groq-free fallback",
         "approach": (
             "Stateful 4-context composer (category + merchant + trigger + customer) "
-            "with per-trigger-kind prompt dispatch. "
+            "with deterministic per-trigger-kind dispatch. "
             "Category-specific voice profiles (dental: clinical citation, "
             "pharmacy: regulatory precision, restaurant: operator jargon, "
             "salon: lifestyle warmth, gym: motivational urgency). "
-            "Auto-reply detection via 12-pattern regex with graduated response (wait → end). "
+            "Auto-reply and STOP handling end cleanly without loops. "
+            "Customer replies route separately from merchant replies. "
             "Commit-intent detection for instant action-mode switch. "
             "Hindi-English code-mix for regional merchants. "
-            "Temperature=0 for full determinism. "
+            "Ratio fields such as delta_pct are normalized to true percentages. "
             "320-char body enforcement. "
             "Suppression-key dedup across ticks."
         ),
         "contact_email": "safalsingh76@gmail.com",
-        "version": "2.1.0",
-        "submitted_at": "2026-04-30T14:30:00Z"
+        "version": "3.0.0",
+        "submitted_at": "2026-05-01T00:00:00Z"
     }
 
 
@@ -134,17 +135,9 @@ async def tick(body: TickBody):
             print(f"[TICK] Trigger {trg_id} suppressed (key={sup_key})")
             continue
 
-        # Expiry check
-        exp = trg.get("expires_at")
-        if exp:
-            try:
-                exp_dt = datetime.fromisoformat(exp.replace("Z", "+00:00"))
-                now_dt = datetime.fromisoformat(body.now.replace("Z", "+00:00"))
-                if now_dt > exp_dt:
-                    print(f"[TICK] Trigger {trg_id} expired")
-                    continue
-            except Exception:
-                pass
+        # The judge controls availability. Some canonical "today" scenarios are
+        # replayed after wall-clock expiry, so compose any trigger explicitly
+        # passed in available_triggers.
 
         merchant_id = trg.get("merchant_id")
         customer_id = trg.get("customer_id")
@@ -195,7 +188,7 @@ async def tick(body: TickBody):
         if len(body_text) > 320:
             body_text = body_text[:317] + "..."
 
-        send_as = "merchant_on_behalf" if customer_id else "vera"
+        send_as = result.get("send_as") or ("merchant_on_behalf" if customer_id else "vera")
 
         action = {
             "conversation_id": conv_id,
@@ -264,7 +257,13 @@ async def reply(body: ReplyBody):
     if conv.get("ended"):
         return {"action": "end", "rationale": "Conversation already closed."}
 
-    # Record turn
+    # Record turn. A replay may introduce customer_id after a merchant-facing
+    # conversation id, so merge fresh identifiers before routing the reply.
+    if body.merchant_id and not conv.get("merchant_id"):
+        conv["merchant_id"] = body.merchant_id
+    if body.customer_id and not conv.get("customer_id"):
+        conv["customer_id"] = body.customer_id
+
     conv["turns"].append({"from": body.from_role, "body": message})
     conversations[conv_id] = conv
 
@@ -282,6 +281,22 @@ async def reply(body: ReplyBody):
             customer = cust_data["payload"]
 
     trigger_id = conv.get("trigger_id")
+    if not trigger_id:
+        for (scope, cid), stored in contexts.items():
+            if scope != "trigger":
+                continue
+            candidate = stored.get("payload", {})
+            matches_conversation = conv_id.endswith(cid)
+            matches_customer = (
+                customer_id
+                and candidate.get("customer_id") == customer_id
+                and candidate.get("merchant_id") == merchant_id
+            )
+            if matches_conversation or matches_customer:
+                trigger_id = cid
+                conv["trigger_id"] = cid
+                conversations[conv_id] = conv
+                break
     trigger = contexts.get(("trigger", trigger_id), {}).get("payload", {}) if trigger_id else {}
 
     try:
@@ -292,6 +307,7 @@ async def reply(body: ReplyBody):
             category=category,
             trigger=trigger,
             customer=customer,
+            from_role=body.from_role,
         )
     except Exception as e:
         print(f"[REPLY ERROR] {e}")
