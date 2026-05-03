@@ -30,12 +30,7 @@ def compose(category: dict, merchant: dict, trigger: dict, customer: dict | None
 if __name__ == "__main__":
     # Quick sanity test
     import os
-    dataset_dir = Path(__file__).parent.parent / "Downloads" / "magicpin-ai-challenge" / "dataset"
-    if not dataset_dir.exists():
-        # Try sibling of Desktop
-        dataset_dir = Path(os.environ.get("USERPROFILE", "C:/Users/darkp")) / "Downloads" / "magicpin-ai-challenge" / "dataset"
-    if not dataset_dir.exists():
-        dataset_dir = Path(__file__).parent
+    dataset_dir = Path(__file__).parent / "dataset"
 
     # Load sample data
     cats = {}

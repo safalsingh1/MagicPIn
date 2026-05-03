@@ -330,20 +330,54 @@ def _price_from_text(text: str, default: str = "") -> str:
 
 def _compose_research_digest(category, merchant, trigger, customer):
     payload = _payload(trigger)
+    slug = (category.get("slug") or "").lower()
+    # Find digest item — prefer 'research' kind, else any digest available
     digest = _find_digest(category, item_id=payload.get("top_item_id"), kind="research")
+    if not digest:
+        digest = _find_digest(category)  # first digest of any kind
+
     owner = _owner(merchant, category)
-    trial = _fmt_number(digest.get("trial_n"))
-    percent = _extract_percent(digest.get("summary"), "38%")
-    source = _clean(digest.get("source") or "latest digest")
-    cohort = _cust_agg(merchant).get("high_risk_adult_count") or _cust_agg(merchant).get("active_count")
-    cohort_line = f" You have {cohort} high-risk adults." if cohort else ""
-    body = (
-        f"{owner}, {source}: {trial}-patient trial shows {percent} lower caries recurrence "
-        f"with 3-month fluoride varnish recalls.{cohort_line} Reply YES for patient note."
-    )
-    return body, "binary_yes_no", [source, trial, percent, cohort], (
-        "Used the research digest plus the merchant's high-risk cohort; CTA externalizes the patient-note work."
-    )
+    source = _clean(digest.get("source") or "latest industry digest")
+    summary_text = _clean(digest.get("summary") or "")
+    trial_n = _fmt_number(digest.get("trial_n"))
+    percent = _extract_percent(digest.get("summary"), "")
+    title = _clean(digest.get("title") or "")
+
+    # Build the insight line — dentists use trial/fluoride framing; other categories use generic
+    if slug == "dentists":
+        trial_line = f"{trial_n}-patient trial shows {percent} lower caries recurrence with 3-month fluoride varnish recalls." if trial_n else f"{percent} reduction in caries recurrence in 3-month fluoride varnish studies."
+        cohort = _cust_agg(merchant).get("high_risk_adult_count") or _cust_agg(merchant).get("active_count")
+        cohort_part = f" You have {cohort} high-risk adults." if cohort else ""
+        body = f"{owner}, {source}: {trial_line}{cohort_part} Reply YES for patient note."
+        params = [source, trial_n, percent, cohort]
+        rationale = "Used the research digest + high-risk cohort; CTA externalizes the patient-note work."
+    elif slug in ("gyms", "salons"):
+        insight = summary_text[:80] if summary_text else (title[:60] if title else "new industry research")
+        members = _perf(merchant).get("views") or _cust_agg(merchant).get("active_count") or ""
+        cohort_part = f" Your {members} active members stand to benefit." if members else ""
+        body = f"{owner}, {source}: {insight}.{cohort_part} Reply YES for a one-page summary."
+        params = [source, insight]
+        rationale = "Category-appropriate research digest; framing stays in gym/salon voice."
+    elif slug == "pharmacies":
+        insight = summary_text[:80] if summary_text else (title[:60] if title else "a new clinical guidance note")
+        rx = _cust_agg(merchant).get("chronic_rx_count") or ""
+        cohort_part = f" Affects {rx} of your chronic-Rx patients." if rx else ""
+        body = f"{owner}, {source}: {insight}.{cohort_part} Reply YES for the actionable summary."
+        params = [source, insight]
+        rationale = "Pharmacy research digest framed for compliance-aware pharmacists."
+    elif slug == "restaurants":
+        insight = summary_text[:80] if summary_text else (title[:60] if title else "a new consumer-behaviour study")
+        body = f"{owner}, {source}: {insight}. One menu tweak can capture this shift. Reply YES for the copy."
+        params = [source, insight]
+        rationale = "Restaurant research digest framed as a practical menu/ops action."
+    else:
+        insight = summary_text[:80] if summary_text else (title[:60] if title else "a new study just published")
+        body = f"{owner}, {source}: {insight}. Reply YES for the key takeaway."
+        params = [source, insight]
+        rationale = "Generic research digest fallback; still uses source + summary."
+
+    return body, "binary_yes_no", params, rationale
+
 
 
 def _compose_regulation_change(category, merchant, trigger, customer):
@@ -517,11 +551,11 @@ def _compose_winback_eligible(category, merchant, trigger, customer):
     dip = _fmt_pct(payload.get("perf_dip_pct") or (_perf(merchant).get("delta_7d") or {}).get("calls_pct"), absolute=True)
     offer = _offer(merchant, category, contains="haircut", fallback_contains="trial")
     body = (
-        f"{owner}, {lapsed} customers drifted in {days} days since Pro expired and calls are down {dip}. "
-        f"Win them back with {offer}. Reply YES for the WhatsApp draft."
+        f"{owner}, {lapsed} customers left in {days} days since Pro expired — calls down {dip}. "
+        f"One {offer} WhatsApp blast can start the recall. Reply YES and I'll draft it now."
     )
     return body, "binary_yes_no", [lapsed, days, dip, offer], (
-        "Leads with concrete lost customers and a low-friction winback draft."
+        "Leads with concrete lost customers + dip + single low-friction action."
     )
 
 
@@ -609,11 +643,12 @@ def _compose_customer_lapsed_hard(category, merchant, trigger, customer):
     focus = _humanize(payload.get("previous_focus") or (customer or {}).get("preferences", {}).get("training_focus") or "your goal")
     offer = _offer(merchant, category, contains="trial")
     body = (
-        f"{name}, you were working on {focus}; {days} days away happens, no judgment. "
-        f"{_merchant_name(merchant)} has {offer} to restart easy. Reply YES - no auto-charge."
+        f"{name}, {days} days since your last session at {_merchant_name(merchant)} — "
+        f"your {focus} progress doesn't reset that fast. "
+        f"{offer} restarts you with no auto-charge. Reply YES."
     )
     return body, "binary_yes_no", [name, days, focus, offer], (
-        "Customer winback references the past goal and removes commitment anxiety."
+        "Customer winback: uses exact days + goal + removes commitment anxiety in one line."
     )
 
 
@@ -767,12 +802,49 @@ def _compose_wedding_package_followup(category, merchant, trigger, customer):
     )
 
 
+def _compose_appointment_tomorrow(category, merchant, trigger, customer):
+    """Appointment reminder: you have a booking tomorrow — confirm or reschedule."""
+    name = _customer_name(customer)
+    merchant_name = _merchant_name(merchant)
+    owner = _owner(merchant, category)
+    offer = _offer(merchant, category)
+    # Try to pull any date/time from payload
+    payload = _payload(trigger)
+    appt_time = _clean(payload.get("appointment_time") or payload.get("slot") or payload.get("label") or "tomorrow")
+    service = _humanize(payload.get("service") or payload.get("service_due") or "your appointment")
+    body = (
+        f"{name}, quick reminder: {service} at {merchant_name} is confirmed for {appt_time}. "
+        f"Reply CONFIRM to keep it or NO to reschedule."
+    )
+    return body, "binary_confirm_cancel", [name, service, appt_time, merchant_name], (
+        "Appointment reminder uses customer name + service + time for a single confirm/reschedule action."
+    )
+
+
+def _compose_customer_lapsed_soft(category, merchant, trigger, customer):
+    """Soft lapse: customer hasn't visited but isn't hard-churned. Gentle re-engagement."""
+    name = _customer_name(customer)
+    merchant_name = _merchant_name(merchant)
+    offer = _offer(merchant, category, contains="trial", fallback_contains="free")
+    cust_pref = (customer or {}).get("preferences", {})
+    interest = _humanize(cust_pref.get("training_focus") or cust_pref.get("preferred_service") or "your last visit")
+    locality = _locality(merchant)
+    body = (
+        f"{name}, we haven't seen you in a while at {merchant_name}. "
+        f"Anyone still asking about {interest} in {locality}? "
+        f"{offer} is live — one reply and I'll hold a slot. Reply YES."
+    )
+    return body, "binary_yes_no", [name, merchant_name, interest, offer], (
+        "Soft lapse: curiosity + local hook + low-friction offer instead of a guilt-trip."
+    )
+
+
 def _compose_generic(category, merchant, trigger, customer):
     payload = _payload(trigger)
     owner = _customer_name(customer) if customer else _owner(merchant, category)
     facts = []
     for key, value in payload.items():
-        if value not in (None, "", [], {}):
+        if value not in (None, "", [], {}, True, False) and key != "placeholder":
             facts.append(f"{key}={_clean(value)}")
         if len(facts) == 2:
             break
@@ -800,6 +872,8 @@ _RENDERERS = {
     "supply_alert": _compose_supply_alert,
     "chronic_refill_due": _compose_chronic_refill_due,
     "customer_lapsed_hard": _compose_customer_lapsed_hard,
+    "customer_lapsed_soft": _compose_customer_lapsed_soft,
+    "appointment_tomorrow": _compose_appointment_tomorrow,
     "gbp_unverified": _compose_gbp_unverified,
     "renewal_due": _compose_renewal_due,
     "active_planning_intent": _compose_active_planning_intent,

@@ -165,9 +165,9 @@ def main():
                     "rationale": result["rationale"],
                 }
                 out.write(json.dumps(line, ensure_ascii=False) + "\n")
-                print(f"    ✓ [{len(result['body'])} chars] {result['body'][:80]}...")
+                print(f"    [OK] [{len(result['body'])} chars] {result['body'][:80]}...")
             except Exception as e:
-                print(f"    ✗ Error: {e}")
+                print(f"    [ERROR] {e}")
     
     print(f"\nSubmission written to: {output_path}")
     # Count lines
